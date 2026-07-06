@@ -1,4 +1,3 @@
-
 ///////////////////////////////////////////////////////////////////////
 // 0 - Globals
 ///////////////////////////////////////////////////////////////////////
@@ -48,8 +47,11 @@ const htmlRenderScreen = document.getElementById('htmlRenderScreen');
 // définir le buffer de rendu des caractères
 let renderBuffer = [];
 
+let doorRenderBuffer = [];
+doorRenderBuffer = new Array(renderScreenWidth * renderScreenHeight).fill(-1);
+
 // on type le ZBuffer en liste (la position permet de déduire la valeur de X/la colonne)
-let ZBuffer = [];
+ZBuffer = new Array(renderScreenWidth).fill(Infinity);
 
 // buffer Sol/plafond
 // utilise des "Float32Array plutôt que tableau JS : plus rapide, initialisé à 0 automatiquement."
@@ -66,8 +68,9 @@ const ditherBufferHeight = renderScreenHeight * 2;
 const imageData = ctx.createImageData(canvasElement.width, canvasElement.height);
 const pixels    = imageData.data; // Uint8ClampedArray
 
-const PI   =  Math.PI;
-const PIx2 =  Math.PI * 2;
+// Des décimales fixes semblent suffire
+const PI   =  3.1415 ;
+const PIx2 =  PI * 2 ;
 
 ///////////////////////////////////////////////////////////////////////
 // 1 - Player Vars
@@ -77,8 +80,7 @@ const PIx2 =  Math.PI * 2;
 const maxRayDepth = 16;
 
 // FOV = pi / 4 (radiants), soit 45°
-const playerFOV = 3.14159 / 4;
-
+const playerFOV = PI / 4;
 
 // vitesse du joueur
 const playerStepRate = 0.2;
@@ -261,10 +263,12 @@ function setPlayerNewPositionAndAngle() {
     playerPosY = nextPlayerPosY;
 };
 
-// DDA Raycaster/Buffering
-// utilisation de l'approche de Lode, réduisant les appels trigonométriques 4 à par images, 
-// au profit d'opération arithmétiques
+
+// Raycaster gère :
+// - murs
+// - portes
 function raycasterDDA() {
+
     for (let x = 0; x < renderScreenWidth; x++) {
 
         // Position sur le plan caméra : -1 (gauche) à +1 (droite)
@@ -288,6 +292,7 @@ function raycasterDDA() {
         
         let distanceToWall = 0;
         let hitWall = false;
+        let doorFoundThisColumn = false;
         let tileSide; 
 
         if   (eyeX > 0) { stepX =  1;
@@ -300,6 +305,9 @@ function raycasterDDA() {
         else            { stepY = -1;
                         sideDistY = (playerPosY - mapY) * deltaDistY; }
 
+        // Pourquoi utiliser une valeur intérmédiaire ?
+        // let dist = 0;
+        // existe déjà : "distanceToWall"
         while (!hitWall && distanceToWall < maxRayDepth) {
             
             if (sideDistX < sideDistY) {
@@ -317,41 +325,187 @@ function raycasterDDA() {
             }
             
             let hitTile = map[mapY * mapWidth + mapX];
-            if (hitTile == wall) hitWall = true;
+
+            if        (hitTile == wall) {
+                
+                hitWall = true; 
+
+                const rayHitPosX = playerPosX + (eyeX * distanceToWall);
+                const rayHitPosY = playerPosY + (eyeY * distanceToWall);        
+
+                // quelle portion du mur est touché ? 
+                let wallSlice;
+                // calcul de la distance perpendiculaire (pour estimer la hauteur des colonnes) - plus de fisheye
+                let perpWallDist;
+
+                if      (tileSide === VERTICAL) {
+                    perpWallDist = (mapX - playerPosX + (1 - stepX) / 2) / eyeX;
+
+                    if  (eyeX > 0) wallSlice = ((rayHitPosY - mapY)*16) | 0;
+                    else           wallSlice = ((rayHitPosY - mapY)*16) | 0;
+                    }
+                else if (tileSide === HORIZONTAL) {      
+                    perpWallDist = (mapY - playerPosY + (1 - stepY) / 2) / eyeY;
+
+                    if  (eyeY > 0) wallSlice = ((rayHitPosX - mapX)*16) | 0;
+                    else           wallSlice = ((rayHitPosX - mapX)*16) | 0;
+                }
+
+                // pour l'occlusion des sprites : on enregistre la distance du rayon du mur, 
+                // on exclue la colonne du sprite s'il vient avant ce dernier
+                ZBuffer[x] = perpWallDist; // ou perpDist pour la porte
+
+                // buffer pour sol/plafond
+                wallHitX[x] = rayHitPosX;
+                wallHitY[x] = rayHitPosY;
+                wallDist[x] = perpWallDist;
+                
+                wallSlice = Math.min(wallSlice, 15);
+
+                // on utilise à présent la distance perpendiculaire plutôt que la longueur du rayon
+                drawColumn(perpWallDist, x, wallSlice, tileSide);   
+
+            } 
+            
+            // LES PORTES !!!
+            else if (hitTile === door || hitTile === doorV) {
+
+                const isDoorD = (hitTile === door);
+
+                // NOUVEAU : le battant n'est visible que si le rayon entre par la face
+                // perpendiculaire à l'axe de déplacement de la porte. Sinon, c'est un
+                // jambage (le renfoncement autour du battant) : un mur plein classique.
+                const properDoorFace = isDoorD
+                    ? (tileSide === VERTICAL)
+                    : (tileSide === HORIZONTAL);
+
+                if (!properDoorFace) {
+                    // JAMBAGE : traité en tout point comme un mur classique
+                    hitWall = true;
+
+                    const rayHitPosX = playerPosX + (eyeX * distanceToWall);
+                    const rayHitPosY = playerPosY + (eyeY * distanceToWall);
+
+                    let wallSlice;
+                    let perpWallDist;
+
+                    if (tileSide === VERTICAL) {
+                        perpWallDist = (mapX - playerPosX + (1 - stepX) / 2) / eyeX;
+                        wallSlice = ((rayHitPosY - mapY) * 16) | 0;
+                    } else {
+                        perpWallDist = (mapY - playerPosY + (1 - stepY) / 2) / eyeY;
+                        wallSlice = ((rayHitPosX - mapX) * 16) | 0;
+                    }
+
+                    ZBuffer[x] = perpWallDist;
+
+                    wallHitX[x] = rayHitPosX;
+                    wallHitY[x] = rayHitPosY;
+                    wallDist[x] = perpWallDist;
+
+                    wallSlice = Math.min(wallSlice, 15);
+
+                    drawColumn(perpWallDist, x, wallSlice, tileSide);
+
+                    continue; // sort de cette itération ; hitWall=true stoppe le while
+                }
+
+                // console.log("door !")
+
+                const d = doors[mapY * mapWidth + mapX];
+                const openOffset = d ? d.open : 0;
+
+                // Position du rayon au milieu de la case = surface de la porte
+                // NOUVEAU : intersection directe avec le plan du battant, fixe dans le
+                // monde à mapX+0.5 / mapY+0.5, plutôt qu'un décalage en "unités de rayon"
+                // (deltaDist * 0.5) qui devenait instable à angle rasant (deltaDist explose
+                // quand le rayon devient parallèle au plan de la porte)
+                const midDist = isDoorD
+                    ? (mapX + 0.5 - playerPosX) / eyeX
+                    : (mapY + 0.5 - playerPosY) / eyeY;
+
+                // Le plan de la porte (mapX/mapY + 0.5) est infini : son intersection avec le
+                // rayon peut mathématiquement exister en dehors du segment [entrée, sortie]
+                // de la case DDA courante. On le vérifie explicitement, sinon on risque de
+                // valider une intersection qui appartient en réalité à une autre case du
+                // parcours du rayon (avant ou après celle-ci).
+                const exitDist = Math.min(sideDistX, sideDistY);
+                if (midDist < distanceToWall || midDist > exitDist) {
+                    continue;
+                }
+
+                const midX = playerPosX + eyeX * midDist;
+                const midY = playerPosY + eyeY * midDist;
+
+                // hitU : coordonnée sur la face perpendiculaire (0→1)
+                // IMPORTANT : on garde Math.trunc(midX/midY), pas mapX/mapY — midX/midY
+                // peuvent avoir dérivé hors de la case d'origine (mapX, mapY) à angle oblique
+                let hitU = isDoorD
+                    ? midY - Math.trunc(midY)
+                    : midX - Math.trunc(midX);
+
+                // Normaliser selon le sens du rayon
+                if (isDoorD  && stepX < 0) hitU = 1 - hitU;
+                if (!isDoorD && stepY < 0) hitU = 1 - hitU;
+                hitU = Math.max(0, Math.min(1, hitU));
+
+                if (hitU < openOffset) continue; // zone ouverte, le rayon passe
+
+                // NOUVEAU : si une porte a déjà été dessinée sur cette colonne, on ignore les suivantes
+                if (doorFoundThisColumn) continue;
+                doorFoundThisColumn = true;
+
+                // NON !!
+                hitWall = true; // <-- à ajouter : la porte a été dessinée, le rayon s'arrête ici
+
+                // Distance perpendiculaire à la surface
+                // NOUVEAU : midDist EST déjà cette distance perpendiculaire (plan fixe),
+                // plus besoin de la recalculer séparément
+                const perpDist = midDist;
+
+                // on ajoute une valeur dans le ZBuffer pour l'occlusion des sprites par les portes
+                // ZBuffer.push(perpDist);
+                ZBuffer[x] = perpDist; // ou perpDist pour la porte
+
+                // pour le dessin sol/plafond
+                wallHitX[x] = midX;
+                wallHitY[x] = midY;
+                wallDist[x] = perpDist;
+
+                // Coordonnée texture : la texture glisse avec la porte
+                const wallSlice = Math.min(
+                    Math.trunc((hitU - openOffset) * wallTextureSize),
+                    wallTextureSize - 1
+                );
+
+                // Dessin dans le renderBuffer
+                const ceiling = renderScreenHeight / 2 - renderScreenHeight / perpDist;
+                const floor   = renderScreenHeight - ceiling;
+
+                for (let y = Math.max(0, Math.ceil(ceiling));
+                        y <= Math.min(renderScreenHeight, Math.trunc(floor));
+                        y++) {
+                    const sampleY = Math.min(
+                        Math.trunc(((y - ceiling) / (floor - ceiling)) * wallTextureSize),
+                        wallTextureSize - 1
+                    );
+
+                    const texValue = doorTexture[sampleY * wallTextureSize + wallSlice];
+
+                    // 4 paliers identiques aux murs + offset porte légèrement plus sombre
+                    const doorOffset = -2;
+                    const shadeValue = perpDist < 3
+                        ? texValue
+                        : perpDist < 6
+                            ? Math.max(0, texValue - 3)
+                            : perpDist < 10
+                                ? Math.max(0, texValue - 6)
+                                : Math.max(0, texValue - 10);
+
+                    doorRenderBuffer[y * renderScreenWidth + x] = Math.max(0, shadeValue + doorOffset);
+                }
+            }                
         };
-        
-        const rayHitPosX = playerPosX + (eyeX * distanceToWall);
-        const rayHitPosY = playerPosY + (eyeY * distanceToWall);        
-
-        // quelle portion du mur est touché ? 
-        let wallSlice;
-        // calcul de la distance perpendiculaire (pour estimer la hauteur des colonnes) - plus de fisheye
-        let perpWallDist;
-
-        if      (tileSide === VERTICAL) {
-            perpWallDist = (mapX - playerPosX + (1 - stepX) / 2) / eyeX;
-
-            if  (eyeX > 0) wallSlice = ((rayHitPosY - mapY)*16) | 0;
-            else           wallSlice = ((rayHitPosY - mapY)*16) | 0;
-            }
-        else if (tileSide === HORIZONTAL) {      
-            perpWallDist = (mapY - playerPosY + (1 - stepY) / 2) / eyeY;
-
-            if  (eyeY > 0) wallSlice = ((rayHitPosX - mapX)*16) | 0;
-            else           wallSlice = ((rayHitPosX - mapX)*16) | 0;
-        }
-
-        ZBuffer.push(distanceToWall);
-
-        // buffer pour sol/plafond
-        wallHitX[x] = rayHitPosX;
-        wallHitY[x] = rayHitPosY;
-        wallDist[x] = perpWallDist;
-        
-        wallSlice = Math.min(wallSlice, 15);
-
-        // on utilise à présent la distance perpendiculaire plutôt que la longueur du rayon
-        drawColumn(perpWallDist, x, wallSlice, tileSide);
     }
 }
 
@@ -477,35 +631,62 @@ function drawCeiling() {
     }
 }
 
-// dessin des sprites par dessus le renderBuffer (abus de langage ? A vérifier)
+function drawDoorColumns() {
+    for (let i = 0; i < doorRenderBuffer.length; i++) {
+        if (doorRenderBuffer[i] !== -1) {
+            renderBuffer[i] = doorRenderBuffer[i];
+        }
+    }
+}
+
 function drawSprites() {
-
-    // Triage des sprites pour ordre priorité de dessin :
-    /*
-    Le concept
-    Tu dois trier le tableau sprites par distance décroissante (le plus loin en premier) avant de les dessiner.
-    Ce que tu sais déjà
-
-    transformY représente la profondeur du sprite
-    Tu peux calculer la distance pour chaque sprite avant de les dessiner
-    Les sprites les plus lointains doivent être dessinés en premier (painter's algorithm)
-
-    Indice
-    Tu pourrais soit trier le tableau sprites directement, soit créer un tableau temporaire avec les distances et trier celui-ci.
-    */
 
     // Inverse du déterminant de la matrice caméra
     let invDet = 1.0 / (planeX * dirY - dirX * planeY);
     
+    ////////////////////////
+    // Tri des sprites
+    ////////////////////////
+
+    // tableau de tri des sprites selon distance
+    let PainterAlgorithm = [];
+
+    // TRI DES SPRITES POUR LE PAINTER'S ALGORITHM :
+    // on parcours le tableau des sprites
+    // On garde ceux présents à l'écran
+    // On tri du plus loin au plus proche
+    // On dessine les sprites dans l'ordre
     for (let i = 0; i < sprites.length; i++) {
         let spriteX = sprites[i][0] - playerPosX;
         let spriteY = sprites[i][1] - playerPosY;
 
-        // Transformation de quoi ?
+        // Transformation -> TransformY = dans le champ de la caméra ?
+        //                   TransformX = Quelle hauteur du sprite par rapport à la profondeur ?
         let transformX = invDet * (dirY * spriteX - dirX * spriteY);
         let transformY = invDet * (-planeY * spriteX + planeX * spriteY);
-        
+
+        // le sprite est dans le bon plan de la caméra ? 
+        // non, on passe à l'itération suivante
         if (transformY <= 0) continue;
+
+        let spriteToSort = [i, transformX, transformY]
+        PainterAlgorithm.push(spriteToSort);
+    }
+
+    // tri de la liste des sprites visibles
+    PainterAlgorithm.sort( function (a, b) { return b[2] - a[2]; } );
+
+    ////////////////////////
+    // Tri des sprites
+    ////////////////////////
+
+    // A présent, on utilise plus le tableau "sprite" pour le dessin, mais "PainterAlgorithm" :
+    // il contient les valeurs requises pour effectuer les dessins de chaque sprite présents à l'écran.
+    for (let i = 0; i < PainterAlgorithm.length; i++) {
+
+        let spriteIndex = PainterAlgorithm[i][0]
+        let transformX  = PainterAlgorithm[i][1];
+        let transformY  = PainterAlgorithm[i][2];
 
         // distance to wall est dans le zbuffer
         let spriteScreenX = (renderScreenWidth / 2) * (1 + transformX / transformY);
@@ -563,111 +744,6 @@ function drawSprites() {
 // Les conditions ternaires suivant la déclaration d'une constante permet de calculer
 // la valeur sans utiliser de variable intermédiaire.
 // Permet de ne pas polluer le scope
-
-// DrawDoors me semble être une redite du DDA - fonctionnel, mais peu élégant.
-function drawDoors() {
-    for (let x = 0; x < renderScreenWidth; x++) {
-
-        const cameraX = 2 * x / renderScreenWidth - 1;
-        const eyeX = dirX + planeX * cameraX;
-        const eyeY = dirY + planeY * cameraX;
-
-        const deltaDistX = 1 / Math.abs(eyeX);
-        const deltaDistY = 1 / Math.abs(eyeY);
-
-        let mapX = playerTileX;
-        let mapY = playerTileY;
-        const stepX = eyeX > 0 ? 1 : -1;
-        const stepY = eyeY > 0 ? 1 : -1;
-
-        let sideDistX = eyeX > 0
-            ? (mapX + 1 - playerPosX) * deltaDistX
-            : (playerPosX - mapX) * deltaDistX;
-        let sideDistY = eyeY > 0
-            ? (mapY + 1 - playerPosY) * deltaDistY
-            : (playerPosY - mapY) * deltaDistY;
-
-        let dist = 0;
-
-        while (dist < maxRayDepth) {
-            if (sideDistX < sideDistY) {
-                dist = sideDistX; sideDistX += deltaDistX; mapX += stepX;
-            } else {
-                dist = sideDistY; sideDistY += deltaDistY; mapY += stepY;
-            }
-
-            const hitTile = map[mapY * mapWidth + mapX];
-            if (hitTile === wall) break; // mur plein devant : stop
-
-            if (hitTile === door || hitTile === doorV) {
-                const d = doors[mapY * mapWidth + mapX];
-                const openOffset = d ? d.open : 0;
-                const isDoorD = (hitTile === door);
-
-                // Position du rayon au milieu de la case = surface de la porte
-                const midDist = isDoorD
-                    ? dist + deltaDistX * 0.5
-                    : dist + deltaDistY * 0.5;
-
-                const midX = playerPosX + eyeX * midDist;
-                const midY = playerPosY + eyeY * midDist;
-
-                // hitU : coordonnée sur la face perpendiculaire (0→1)
-                let hitU = isDoorD
-                    ? midY - Math.trunc(midY)
-                    : midX - Math.trunc(midX);
-
-                // Normaliser selon le sens du rayon
-                if (isDoorD  && stepX < 0) hitU = 1 - hitU;
-                if (!isDoorD && stepY < 0) hitU = 1 - hitU;
-                hitU = Math.max(0, Math.min(1, hitU));
-
-                if (hitU < openOffset) continue; // zone ouverte, le rayon passe
-
-                // Distance perpendiculaire à la surface
-                const perpDist = isDoorD
-                    ? (mapX - playerPosX + (1 - stepX) / 2) / eyeX + deltaDistX * 0.5
-                    : (mapY - playerPosY + (1 - stepY) / 2) / eyeY + deltaDistY * 0.5;
-
-                // Ne dessiner que si la porte est devant le mur rendu
-                if (perpDist >= ZBuffer[x]) break;
-
-                // Coordonnée texture : la texture glisse avec la porte
-                const wallSlice = Math.min(
-                    Math.trunc((hitU - openOffset) * wallTextureSize),
-                    wallTextureSize - 1
-                );
-
-                // Dessin dans le renderBuffer
-                const ceiling = renderScreenHeight / 2 - renderScreenHeight / perpDist;
-                const floor   = renderScreenHeight - ceiling;
-
-                for (let y = Math.max(0, Math.ceil(ceiling));
-                        y <= Math.min(renderScreenHeight, Math.trunc(floor));
-                        y++) {
-                    const sampleY = Math.min(
-                        Math.trunc(((y - ceiling) / (floor - ceiling)) * wallTextureSize),
-                        wallTextureSize - 1
-                    );
-                    const texValue = doorTexture[sampleY * wallTextureSize + wallSlice];
-
-                    // 4 paliers identiques aux murs + offset porte légèrement plus sombre
-                    const doorOffset = -2;
-                    const shadeValue = perpDist < 3
-                        ? texValue
-                        : perpDist < 6
-                            ? Math.max(0, texValue - 3)
-                            : perpDist < 10
-                                ? Math.max(0, texValue - 6)
-                                : Math.max(0, texValue - 10);
-
-                    renderBuffer[y * renderScreenWidth + x] = Math.max(0, shadeValue + doorOffset);
-                }
-                break;
-            }
-        }
-    }
-}
 
 // Nouveau applyDithering : Bayer 4×4, rendu 1-bit dans imageData (canvas)
 //
@@ -755,6 +831,8 @@ function gameLoop() {
 
     // Reset le buffer (peut être pas la meilleure solution mais évite les "undefined")
     renderBuffer.fill(0);
+    // RAPPEL : -1 = transparence
+    doorRenderBuffer.fill(-1)
 
     raycasterDDA();
 
@@ -764,8 +842,10 @@ function gameLoop() {
     drawCeiling();
     drawFloor();
     // dessiné après les murs/sol
-    drawDoors();
+    drawDoorColumns(); // NOUVEAU : remplace l'ancien drawDoors()
     // dessins des sprites juste APRES le raycaster et AVANT le dithering
+    // NOUVEAU PROBLEME : bah les sprites sont dessinés par dessus la porte lol
+    // Test : dessiner sprite avant porte
     drawSprites()
 
     /*/////////////////////////////////////
@@ -779,7 +859,7 @@ function gameLoop() {
 
     // console.log(ZBuffer);
     // on vide le z-buffer à la fin de chaque cycle
-    ZBuffer = [];
+    ZBuffer = new Array(renderScreenWidth).fill(Infinity);
     playerActionDone = false;
 };
 
